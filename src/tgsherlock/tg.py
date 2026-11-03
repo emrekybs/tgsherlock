@@ -123,6 +123,66 @@ def media_kind(msg):
     return "media"
 
 
+def msg_extra(msg):
+    """Extra metadata shown in the message detail panel."""
+    x = {}
+    try:
+        if msg.views is not None:
+            x["views"] = msg.views
+        if msg.forwards:
+            x["forwards"] = msg.forwards
+        if msg.replies is not None and getattr(msg.replies, "replies", None):
+            x["replies"] = msg.replies.replies
+        rt = msg.reply_to
+        if rt is not None:
+            if getattr(rt, "reply_to_msg_id", None):
+                x["reply_to"] = rt.reply_to_msg_id
+            if getattr(rt, "forum_topic", False):
+                x["topic_id"] = getattr(rt, "reply_to_top_id", None) or rt.reply_to_msg_id
+        if msg.edit_date:
+            x["edited"] = to_iso(msg.edit_date)
+        if msg.post_author:
+            x["post_author"] = msg.post_author
+        if msg.fwd_from:
+            f = msg.fwd_from
+            name = f.from_name
+            if not name:
+                try:
+                    fwd = msg.forward
+                    ent = fwd.chat or fwd.sender if fwd is not None else None
+                    name = display_name(ent) if ent else None
+                except Exception:  # noqa: BLE001
+                    name = None
+            if not name and f.from_id:
+                name = str(utils.get_peer_id(f.from_id))
+            x["fwd_from"] = name or "Hidden sender"
+            if f.date:
+                x["fwd_date"] = to_iso(f.date)
+        if msg.via_bot_id:
+            x["via_bot"] = msg.via_bot_id
+        if isinstance(msg.media, types.MessageMediaWebPage):
+            wp = msg.media.webpage
+            if getattr(wp, "url", None):
+                x["link_preview"] = {"url": wp.url, "title": getattr(wp, "title", None) or "",
+                                     "site": getattr(wp, "site_name", None) or ""}
+        elif msg.file:
+            if msg.file.name:
+                x["file_name"] = msg.file.name
+            if msg.file.size:
+                x["file_size"] = msg.file.size
+            if msg.file.mime_type:
+                x["mime"] = msg.file.mime_type
+        if msg.grouped_id:
+            x["album"] = msg.grouped_id
+        if msg.pinned:
+            x["pinned"] = True
+        if msg.noforwards:
+            x["protected"] = True
+    except Exception:  # noqa: BLE001
+        pass
+    return x
+
+
 def parse_day(value, end=False):
     if not value:
         return None
@@ -313,6 +373,8 @@ class TG:
     # ---- login flow ----------------------------------------------------------
     def auth_state(self):
         a = self.auth
+        if a and a.get("state") == "done" and not self.authorized and not self.connecting:
+            self.auth = a = None
         if not a:
             return {"state": "idle", "last_api": self.settings["last_api"]}
         return {k: a.get(k) for k in ("state", "qr", "expires", "error", "hint", "phone")}
@@ -483,6 +545,8 @@ class TG:
         acc = self.settings.account(account_id)
         if not acc:
             raise UserError("Unknown account.")
+        if self.auth and "client" not in self.auth:
+            self.auth = None
         was_active = self.account and str(self.account["id"]) == str(acc["id"])
         if was_active and self.client:
             try:
@@ -596,6 +660,9 @@ class TG:
             "sender_id": msg.sender_id, "sender_name": display_name(sender),
             "sender_username": getattr(sender, "username", None) or "",
             "date": to_iso(msg.date), "text": text, "media": media_kind(msg), "risk": risk,
+            "chat_type": chat_kind(chat) if chat is not None else "",
+            "chat_username": (getattr(chat, "username", None) or "") if chat is not None else "",
+            "extra": msg_extra(msg),
         }
 
     async def _download(self, msg, rec):
@@ -745,6 +812,7 @@ class TG:
             raise UserError("Type at least 2 characters.")
         res = await client(functions.contacts.SearchRequest(q=q, limit=50))
         out = []
+        self.db.observe([(u.id, display_name(u), u.username) for u in res.users if not u.deleted], "search")
         for u in res.users:
             flags = [n for n, v in (("Premium", u.premium), ("Verified", u.verified),
                                     ("Scam", u.scam), ("Fake", u.fake)) if v]
@@ -769,8 +837,21 @@ class TG:
         try:
             if isinstance(ent, types.Channel):
                 full = await client(functions.channels.GetFullChannelRequest(ent))
-                info["members"] = full.full_chat.participants_count
-                info["about"] = full.full_chat.about or ""
+                fc = full.full_chat
+                info["members"] = fc.participants_count
+                info["about"] = fc.about or ""
+                info["online"] = getattr(fc, "online_count", None)
+                info["admins"] = getattr(fc, "admins_count", None)
+                info["banned"] = getattr(fc, "kicked_count", None)
+                info["slowmode"] = getattr(fc, "slowmode_seconds", None)
+                info["pinned"] = getattr(fc, "pinned_msg_id", None)
+                info["hidden_members"] = bool(getattr(fc, "participants_hidden", False))
+                linked = getattr(fc, "linked_chat_id", None)
+                if linked:
+                    lc = next((c for c in full.chats if c.id == linked), None)
+                    if lc is not None:
+                        info["linked"] = {"id": utils.get_peer_id(lc), "title": display_name(lc),
+                                          "username": getattr(lc, "username", None) or "", "kind": chat_kind(lc)}
             elif isinstance(ent, types.Chat):
                 full = await client(functions.messages.GetFullChatRequest(ent.id))
                 parts = getattr(full.full_chat.participants, "participants", None)
@@ -778,7 +859,78 @@ class TG:
                 info["about"] = full.full_chat.about or ""
         except Exception:  # noqa: BLE001
             pass
+        info["flags"] = [n for n, v in (
+            ("Verified", getattr(ent, "verified", False)), ("Scam", getattr(ent, "scam", False)),
+            ("Fake", getattr(ent, "fake", False)), ("Forum", getattr(ent, "forum", False)),
+            ("Restricted", getattr(ent, "restricted", False)), ("Protected content", getattr(ent, "noforwards", False)),
+            ("Join request", getattr(ent, "join_request", False)), ("Hidden members", info.get("hidden_members")),
+        ) if v]
+        info["restrictions"] = [f"{r.platform}: {r.reason} — {r.text}" for r in (getattr(ent, "restriction_reason", None) or [])]
+        try:
+            info["total_messages"] = (await client.get_messages(ent, limit=0)).total
+        except Exception:  # noqa: BLE001
+            pass
         return info
+
+    async def join_chat(self, target):
+        client = self.require()
+        m = INVITE_RX.search(target or "")
+        try:
+            if m:
+                await client(functions.messages.ImportChatInviteRequest(m.group(1)))
+            else:
+                ent = await self.resolve(target)
+                if not isinstance(ent, types.Channel):
+                    raise UserError("Only groups and channels can be joined.")
+                await client(functions.channels.JoinChannelRequest(ent))
+        except errors.UserAlreadyParticipantError:
+            pass
+        except UserError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            if "InviteRequestSent" in type(exc).__name__:
+                raise UserError("Join request sent — an admin of the chat has to approve it.")
+            raise UserError(friendly(exc)) from exc
+        self._dialogs_loaded = False
+        return True
+
+    async def context(self, chat_id, msg_id, before=15, after=5):
+        """Messages around msg_id in a chat, oldest first."""
+        client = self.require()
+        try:
+            ent = await client.get_entity(int(chat_id))
+        except Exception as exc:  # noqa: BLE001
+            raise UserError("This chat is not reachable from the current account.") from exc
+        older = await client.get_messages(ent, limit=max(0, before), offset_id=int(msg_id)) if before else []
+        newer = await client.get_messages(ent, limit=max(0, after) + 1, offset_id=int(msg_id) - 1, reverse=True) if after >= 0 else []
+        msgs = [m for m in list(reversed(list(older))) + list(newer) if m is not None and not isinstance(m, types.MessageService)]
+        out = []
+        for m in msgs:
+            rec = self.public_msg(self.record(m, ent, m.sender))
+            rec["focus"] = m.id == int(msg_id)
+            out.append(rec)
+        return {"chat": {"id": utils.get_peer_id(ent), "title": display_name(ent), "username": getattr(ent, "username", None) or "",
+                         "kind": chat_kind(ent)},
+                "messages": out, "has_more": len(older) >= before > 0}
+
+    async def profile_photo(self, user_id, index):
+        client = self.require()
+        folder = account_dir(self.account["id"]) / "avatars"
+        folder.mkdir(exist_ok=True)
+        path = folder / f"{user_id}_p{index}.jpg"
+        if path.exists() and time.time() - path.stat().st_mtime < 86400:
+            return path.read_bytes() or None
+        data = None
+        async with self._avatar_sem:
+            try:
+                ent = await client.get_entity(int(user_id))
+                photos = await client.get_profile_photos(ent, limit=int(index) + 1)
+                if len(photos) > int(index):
+                    data = await client.download_media(photos[int(index)], file=bytes)
+            except Exception:  # noqa: BLE001
+                data = None
+        path.write_bytes(data or b"")
+        return data
 
     async def profile(self, query):
         client = self.require()
@@ -791,21 +943,72 @@ class TG:
         usernames = [f"@{u.username}" for u in (ent.usernames or []) if u.username]
         if ent.username and f"@{ent.username}" not in usernames:
             usernames.insert(0, f"@{ent.username}")
-        common = []
+        common, common_ents = [], []
         try:
             res = await client(functions.messages.GetCommonChatsRequest(user_id=ent, max_id=0, limit=100))
+            common_ents = list(res.chats)
             for c in res.chats:
                 common.append({"id": utils.get_peer_id(c), "title": display_name(c), "kind": chat_kind(c),
                                "username": getattr(c, "username", None) or "",
                                "members": getattr(c, "participants_count", None)})
         except Exception:  # noqa: BLE001
             pass
-        photos = 0
+        photos, photo_list = 0, []
         try:
-            photos = (await client.get_profile_photos(ent, limit=0)).total
+            ph = await client.get_profile_photos(ent, limit=12)
+            photos = ph.total
+            photo_list = [{"index": i, "date": to_iso(x.date), "video": bool(getattr(x, "video_sizes", None))}
+                          for i, x in enumerate(ph)]
         except Exception:  # noqa: BLE001
             pass
+        recs = []
+        for chat in common_ents[:20]:
+            try:
+                async for m in client.iter_messages(chat, from_user=ent, limit=30):
+                    if not isinstance(m, types.MessageService):
+                        recs.append(self.record(m, chat, ent))
+            except Exception:  # noqa: BLE001
+                continue
+        if recs:
+            self.db.add_messages(recs, "profile")
+            for rec in recs:
+                self.db.add_entities(extract_entities(rec["text"]), rec["chat_title"])
+        extra = {}
+        bot_info = getattr(fu, "bot_info", None)
+        if ent.bot and bot_info is not None:
+            extra["bot_description"] = getattr(bot_info, "description", "") or ""
+            extra["bot_commands"] = [{"command": c.command, "description": c.description}
+                                     for c in (getattr(bot_info, "commands", None) or [])]
+            if getattr(ent, "bot_active_users", None):
+                extra["bot_users"] = ent.bot_active_users
+        pc_id = getattr(fu, "personal_channel_id", None)
+        if pc_id:
+            pc = next((c for c in full.chats if c.id == pc_id), None)
+            if pc is not None:
+                extra["personal_channel"] = {"id": utils.get_peer_id(pc), "title": display_name(pc),
+                                             "username": getattr(pc, "username", None) or ""}
+        bday = getattr(fu, "birthday", None)
+        if bday is not None:
+            extra["birthday"] = (f"{bday.year}-{bday.month:02d}-{bday.day:02d}" if getattr(bday, "year", None)
+                                 else f"{bday.day:02d}.{bday.month:02d}")
+        extra["restrictions"] = [f"{r.platform}: {r.reason} — {r.text}" for r in (ent.restriction_reason or [])]
+        if getattr(ent, "lang_code", None):
+            extra["lang"] = ent.lang_code
+        if getattr(fu, "private_forward_name", None):
+            extra["forward_name"] = fu.private_forward_name
+        biz = getattr(fu, "business_location", None)
+        if biz is not None and getattr(biz, "address", None):
+            extra["business_address"] = biz.address
+        extra["mutual_contact"] = bool(getattr(ent, "mutual_contact", False))
+        extra["blocked"] = bool(getattr(fu, "blocked", False))
         db = self.db
+        db.observe([(ent.id, display_name(ent), u.lstrip("@")) for u in (usernames or [""])], "profile")
+        history = db.q("SELECT name, username, MIN(first_seen) AS first_seen, MAX(last_seen) AS last_seen,"
+                       " GROUP_CONCAT(DISTINCT source) AS sources FROM identities WHERE user_id=?"
+                       " GROUP BY name, username ORDER BY first_seen", (ent.id,))
+        listed = db.q("SELECT m.chat_id, MAX(m.chat_title) AS chat_title, MAX(m.role) AS role, MIN(m.joined) AS joined,"
+                      " MAX(j.created) AS checked FROM members m LEFT JOIN jobs j ON j.id = m.job_id WHERE m.user_id=?"
+                      " GROUP BY m.chat_id", (ent.id,))
         local = db.q(
             "SELECT chat_id, MAX(chat_title) AS chat_title, COUNT(DISTINCT msg_id) AS n, MIN(date) AS first,"
             " MAX(date) AS last FROM messages WHERE sender_id=? GROUP BY chat_id", (ent.id,))
@@ -813,6 +1016,11 @@ class TG:
         for c in common:
             seen[c["id"]] = {"id": c["id"], "title": c["title"], "kind": c["kind"], "username": c["username"],
                              "members": c["members"], "member": True, "posts": 0, "first": None, "last": None}
+        for row in listed:
+            item = seen.setdefault(row["chat_id"], {"id": row["chat_id"], "title": row["chat_title"], "kind": "Group",
+                                                    "username": "", "members": None, "member": False, "posts": 0,
+                                                    "first": None, "last": None})
+            item.update(listed=True, role=row["role"], joined=row["joined"], checked=row["checked"])
         for row in local:
             item = seen.setdefault(row["chat_id"], {"id": row["chat_id"], "title": row["chat_title"], "kind": "",
                                                     "username": "", "members": None, "member": False})
@@ -836,7 +1044,8 @@ class TG:
                       "scam": bool(ent.scam), "fake": bool(ent.fake), "restricted": bool(ent.restricted),
                       "contact": bool(ent.contact)},
             "common_count": fu.common_chats_count, "seen_in": seen_list, "hours_utc": hours,
-            "recent": recent, "totals": totals,
+            "recent": recent, "totals": totals, "photo_list": photo_list, "extra": extra, "scanned": len(recs),
+            "identity_history": history,
             "watched": any(str(t["id"]) == str(ent.id) for t in self.live_targets),
         }
 
@@ -934,21 +1143,86 @@ class TG:
             ent = inv.chat
         else:
             ent = await self.resolve(target)
-        job["info"] = await self.chat_info(ent)
-        self._progress(jid, force=True, total=limit, label=f"Reading {job['info']['title']}")
+        job["info"] = info = await self.chat_info(ent)
+        if p.get("members", True):
+            await self._fetch_members(jid, ent, job, clamp_limit(p.get("members_limit"), 5000))
+        self._progress(jid, force=True, done=0, total=limit, label=f"Reading {info['title']}")
         batch = []
-        async for msg in client.iter_messages(ent, limit=limit, offset_date=d_to):
-            if d_from and msg.date < d_from:
-                break
-            if isinstance(msg, types.MessageService):
-                continue
-            batch.append(self.record(msg, ent, msg.sender))
-            if len(batch) >= 100:
-                self._store(jid, batch)
-                batch = []
-                self._progress(jid, done=job["count"], label=f"Reading {job['info']['title']} · {msg.date:%Y-%m-%d}")
+        try:
+            async for msg in client.iter_messages(ent, limit=limit, offset_date=d_to):
+                if d_from and msg.date < d_from:
+                    break
+                if isinstance(msg, types.MessageService):
+                    continue
+                batch.append(self.record(msg, ent, msg.sender))
+                if len(batch) >= 100:
+                    self._store(jid, batch)
+                    batch = []
+                    self._progress(jid, done=job["count"], label=f"Reading {info['title']} · {msg.date:%Y-%m-%d}")
+        except (errors.ChannelPrivateError, errors.ChatAdminRequiredError, errors.ChatForbiddenError) as exc:
+            info["note"] = f"Telegram refused to return messages ({type(exc).__name__}). Join the chat in Telegram and try again."
         self._store(jid, batch)
+        if not job["count"] and not info.get("note"):
+            if d_from or d_to:
+                info["note"] = "No messages in the selected date range."
+            elif not info.get("joined"):
+                info["note"] = ("Telegram returned no messages: this chat hides its history from non-members. "
+                                "Join it and run again.")
+            elif not info.get("total_messages"):
+                info["note"] = "This chat has no messages."
         self._progress(jid, force=True, done=job["count"])
+
+    def _member_row(self, u):
+        part = getattr(u, "participant", None)
+        if isinstance(part, (types.ChannelParticipantCreator, types.ChatParticipantCreator)):
+            role = "Creator"
+        elif isinstance(part, (types.ChannelParticipantAdmin, types.ChatParticipantAdmin)):
+            role = "Admin"
+        elif isinstance(part, types.ChannelParticipantBanned):
+            role = "Restricted"
+        else:
+            role = "Member"
+        rank = getattr(part, "rank", None)
+        status, seen = status_info(u.status)
+        flags = [n for n, v in (("Bot", u.bot), ("Premium", u.premium), ("Verified", u.verified), ("Scam", u.scam),
+                                ("Fake", u.fake), ("Deleted", u.deleted), ("Contact", u.contact)) if v]
+        joined = getattr(part, "date", None)
+        return {"user_id": u.id, "name": display_name(u), "username": u.username or "", "phone": u.phone or "",
+                "role": f"{role} · {rank}" if rank else role, "joined": to_iso(joined) if joined else None,
+                "status": status, "seen_at": seen, "flags": flags, "photo": has_photo(u)}
+
+    async def _fetch_members(self, jid, ent, job, limit):
+        client = self.client
+        info = job["info"]
+        self._progress(jid, force=True, done=0, total=0, label="Reading member list…")
+        rows = []
+
+        async def collect(flt=None):
+            async for u in client.iter_participants(ent, limit=limit, filter=flt):
+                rows.append(self._member_row(u))
+                if len(rows) % 200 == 0:
+                    self._progress(jid, label=f"Reading member list · {len(rows)}")
+
+        try:
+            await collect()
+        except errors.FloodWaitError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            log.info("Member list unavailable: %s", exc)
+            rows.clear()
+            if isinstance(ent, types.Channel) and ent.broadcast:
+                info["members_note"] = "Channel subscriber lists are only visible to the channel's admins."
+            else:
+                info["members_note"] = "Telegram hides this member list (hidden by the admins, or you have not joined)."
+                try:
+                    await collect(types.ChannelParticipantsAdmins())
+                    if rows:
+                        info["members_note"] += " Showing administrators only."
+                except Exception:  # noqa: BLE001
+                    pass
+        if rows:
+            self.db.add_members(jid, info["id"], rows, info.get("title", ""))
+        info["members_fetched"] = len(rows)
 
     async def _job_sweep(self, jid, p, job):
         client = self.client

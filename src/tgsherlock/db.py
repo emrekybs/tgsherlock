@@ -50,8 +50,30 @@ CREATE TABLE IF NOT EXISTS jobs (
     created TEXT, finished TEXT, error TEXT
 );
 
+CREATE TABLE IF NOT EXISTS members (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id INTEGER, chat_id INTEGER, chat_title TEXT DEFAULT '', user_id INTEGER,
+    name TEXT, username TEXT, phone TEXT, role TEXT, joined TEXT,
+    status TEXT, seen_at TEXT, flags TEXT DEFAULT '[]', photo INTEGER DEFAULT 0,
+    UNIQUE(job_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS ix_members_job ON members(job_id);
+CREATE INDEX IF NOT EXISTS ix_members_user ON members(user_id);
+
+CREATE TABLE IF NOT EXISTS identities (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER, name TEXT, username TEXT,
+    first_seen TEXT, last_seen TEXT, source TEXT,
+    UNIQUE(user_id, name, username)
+);
+CREATE INDEX IF NOT EXISTS ix_ident_user ON identities(user_id);
+
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT);
 """
+
+MIGRATIONS = {
+    "messages": [("chat_type", "TEXT DEFAULT ''"), ("chat_username", "TEXT DEFAULT ''"), ("extra", "TEXT DEFAULT '{}'")],
+}
 
 
 def now_iso() -> str:
@@ -82,6 +104,11 @@ class DB:
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA synchronous=NORMAL")
         self.conn.executescript(SCHEMA)
+        for table, cols in MIGRATIONS.items():
+            have = {r[1] for r in self.conn.execute(f"PRAGMA table_info({table})").fetchall()}
+            for name, decl in cols:
+                if name not in have:
+                    self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
         self.conn.commit()
 
     def close(self):
@@ -121,16 +148,54 @@ class DB:
         captured = now_iso()
         data = [(r["chat_id"], r["chat_title"], r["msg_id"], r["sender_id"], r["sender_name"],
                  r["sender_username"], r["date"], r["text"], r.get("media"), r.get("media_path"),
-                 r.get("risk", "clean"), source, job_id, captured) for r in rows]
+                 r.get("risk", "clean"), source, job_id, captured, r.get("chat_type") or "",
+                 r.get("chat_username") or "", json.dumps(r.get("extra") or {}, ensure_ascii=False)) for r in rows]
         self.conn.executemany(
             "INSERT OR IGNORE INTO messages(chat_id, chat_title, msg_id, sender_id, sender_name, sender_username,"
-            " date, text, media, media_path, risk, source, job_id, captured_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " date, text, media, media_path, risk, source, job_id, captured_at, chat_type, chat_username, extra)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             data)
+        self.observe([(r["sender_id"], r["sender_name"], r["sender_username"]) for r in rows
+                      if r.get("sender_id") and r["sender_id"] > 0 and r.get("sender_name")], source, commit=False)
         self.conn.commit()
 
+    def observe(self, people, source, commit=True):
+        """Record (user_id, name, username) snapshots to build a name/username history."""
+        ts = now_iso()
+        self.conn.executemany(
+            "INSERT INTO identities(user_id, name, username, first_seen, last_seen, source) VALUES (?,?,?,?,?,?)"
+            " ON CONFLICT(user_id, name, username) DO UPDATE SET last_seen=excluded.last_seen",
+            [(int(uid), name or "", (username or "").lstrip("@"), ts, ts, source) for uid, name, username in people if uid])
+        if commit:
+            self.conn.commit()
+
     def messages(self, where="1=1", args=(), limit=200, offset=0, order="date DESC"):
-        return self.q(f"SELECT * FROM messages WHERE {where} ORDER BY {order} LIMIT ? OFFSET ?",
+        rows = self.q(f"SELECT * FROM messages WHERE {where} ORDER BY {order} LIMIT ? OFFSET ?",
                       tuple(args) + (limit, offset))
+        for r in rows:
+            try:
+                r["extra"] = json.loads(r.get("extra") or "{}")
+            except ValueError:
+                r["extra"] = {}
+        return rows
+
+    def add_members(self, job_id, chat_id, rows, chat_title=""):
+        self.observe([(m["user_id"], m["name"], m["username"]) for m in rows if m["name"] != "Deleted account"],
+                     "member list", commit=False)
+        self.conn.executemany(
+            "INSERT OR REPLACE INTO members(job_id, chat_id, chat_title, user_id, name, username, phone, role, joined,"
+            " status, seen_at, flags, photo) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            [(job_id, chat_id, chat_title, m["user_id"], m["name"], m["username"], m["phone"], m["role"], m["joined"],
+              m["status"], m["seen_at"], json.dumps(m["flags"]), 1 if m["photo"] else 0) for m in rows])
+        self.conn.commit()
+
+    def members(self, job_id, limit=20000):
+        rows = self.q("SELECT * FROM members WHERE job_id=? ORDER BY CASE role WHEN 'Creator' THEN 0 WHEN 'Admin' THEN 1"
+                      " ELSE 2 END, name COLLATE NOCASE LIMIT ?", (job_id, limit))
+        for r in rows:
+            r["flags"] = json.loads(r["flags"] or "[]")
+            r["photo"] = bool(r["photo"])
+        return rows
 
     def count(self, where="1=1", args=()):
         return self.one(f"SELECT COUNT(*) AS n FROM messages WHERE {where}", args)["n"]

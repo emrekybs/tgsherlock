@@ -13,7 +13,7 @@
 pipx install tgsherlock
 ```
 
-From a local clone: `pipx install .` (if `tgsherlock` is not found afterwards, run `pipx ensurepath` and open a new terminal).
+Latest from GitHub: `pipx install git+https://github.com/emrekybs/tgsherlock.git` (if `tgsherlock` is not found afterwards, run `pipx ensurepath` and open a new terminal).
 
 ## Run
 
@@ -36,6 +36,8 @@ The panel opens in your browser at `http://127.0.0.1:8765`. On Linux, the first 
 - **Archive & export**: filter everything you collected and export it as CSV, JSON or an HTML report.
 - **Multiple accounts**: add, switch and sign out from the sidebar.
 
+Update: `pipx upgrade tgsherlock`
+
 Options: `--port 8790`, `--no-browser`, `--install-desktop`, `--uninstall-desktop`.
 Data stays local: `~/.config/tgsherlock` (settings, sessions) and `~/.local/share/tgsherlock` (databases, media).
 
@@ -45,4 +47,4 @@ Built for defensive OSINT and threat intelligence. TGSherlock only sees what you
 
 ## License
 
-MIT. Based on [OSINTelegram](https://github.com/Ivancastl/OSINTelegram) by Iván Castañeda.
+MIT

@@ -298,10 +298,47 @@ async def job_get(request):
                    wait_until=live.get("wait_until", 0))
     rows = db.messages("job_id=?", (jid,), limit=int(request.query.get("limit", 1000)))
     job["rows"] = rows
+    job["senders"] = db.q("SELECT sender_id, MAX(sender_name) AS sender_name, MAX(sender_username) AS sender_username,"
+                          " COUNT(*) AS n, MIN(date) AS first, MAX(date) AS last FROM messages WHERE job_id=?"
+                          " GROUP BY sender_id ORDER BY n DESC LIMIT 50", (jid,))
+    job["per_day"] = db.q("SELECT substr(date, 1, 10) AS day, COUNT(*) AS n, SUM(risk='high') AS high FROM messages"
+                          " WHERE job_id=? GROUP BY day ORDER BY day", (jid,))
+    job["media_stats"] = db.q("SELECT media, COUNT(*) AS n FROM messages WHERE job_id=? AND media IS NOT NULL"
+                              " GROUP BY media ORDER BY n DESC", (jid,))
+    if job["kind"] == "history":
+        job["members"] = db.members(jid)
     if job["kind"] == "tracker":
         job["groups"] = db.q("SELECT chat_id, MAX(chat_title) AS chat_title, COUNT(*) AS n, MIN(date) AS first,"
                              " MAX(date) AS last FROM messages WHERE job_id=? GROUP BY chat_id ORDER BY last DESC", (jid,))
     return ok(job)
+
+
+async def chat_join(request):
+    need_db(request)
+    await tg(request).join_chat((await body(request)).get("target"))
+    return ok()
+
+
+async def context(request):
+    need_db(request)
+    q = request.query
+    try:
+        chat_id, msg_id = int(q.get("chat_id")), int(q.get("msg_id"))
+        before, after = min(int(q.get("before", 15)), 50), min(int(q.get("after", 5)), 50)
+    except (TypeError, ValueError):
+        raise UserError("Invalid message reference.")
+    return ok(await tg(request).context(chat_id, msg_id, before, after))
+
+
+async def profile_photo(request):
+    need_db(request)
+    uid, idx = request.match_info["id"], request.match_info["idx"]
+    if not re.fullmatch(r"\d+", uid) or not re.fullmatch(r"\d{1,2}", idx):
+        raise web.HTTPNotFound()
+    data = await tg(request).profile_photo(uid, idx)
+    if not data:
+        raise web.HTTPNotFound()
+    return web.Response(body=data, content_type="image/jpeg", headers={"Cache-Control": "max-age=3600"})
 
 
 async def job_cancel(request):
@@ -354,7 +391,7 @@ def archive_where(query):
     if query.get("risk") in ("high", "watch", "clean"):
         where.append("risk=?")
         args.append(query["risk"])
-    if query.get("source") in ("live", "alert", "history", "sweep", "tracker"):
+    if query.get("source") in ("live", "alert", "history", "sweep", "tracker", "profile"):
         where.append("source=?")
         args.append(query["source"])
     days = query.get("days")
@@ -378,8 +415,19 @@ async def archive(request):
     return ok({"rows": rows, "total": db.count(where, args), "offset": offset, "stats": stats})
 
 
-EXPORT_COLS = ["date", "chat_title", "chat_id", "sender_name", "sender_username", "sender_id", "msg_id",
-               "text", "media", "risk", "source"]
+EXPORT_COLS = ["date", "chat_title", "chat_type", "chat_id", "chat_username", "sender_name", "sender_username",
+               "sender_id", "msg_id", "text", "media", "risk", "source", "views", "forwards", "fwd_from", "link"]
+
+
+def flatten(rows):
+    for r in rows:
+        x = r.get("extra") or {}
+        if isinstance(x, dict):
+            r["views"], r["forwards"], r["fwd_from"] = x.get("views"), x.get("forwards"), x.get("fwd_from")
+        cid, user = str(r.get("chat_id") or ""), r.get("chat_username")
+        r["link"] = (f"https://t.me/{user}/{r.get('msg_id')}" if user else
+                     f"https://t.me/c/{cid[4:]}/{r.get('msg_id')}" if cid.startswith("-100") else "")
+    return rows
 
 
 def render_export(rows, cols, fmt, title):
@@ -417,6 +465,13 @@ async def export(request):
         job = db.job(jid) or {}
         rows = db.messages("job_id=?", (jid,), limit=100000)
         title = f"TGSherlock · {job.get('kind', 'job')} #{jid}"
+    elif scope == "members":
+        jid = int(request.query.get("id", 0))
+        rows = db.members(jid)
+        for r in rows:
+            r["flags"] = ", ".join(r["flags"])
+        cols = ["chat_title", "user_id", "name", "username", "phone", "role", "joined", "status", "seen_at", "flags"]
+        title = f"TGSherlock · members #{jid}"
     elif scope == "live":
         rows = db.messages("source='live'", limit=100000)
         title = "TGSherlock · live monitor"
@@ -432,6 +487,8 @@ async def export(request):
         where, args = archive_where(request.query)
         rows = db.messages(where, args, limit=100000)
         title = "TGSherlock · archive"
+    if cols is EXPORT_COLS:
+        rows = flatten(rows)
     text, ctype, ext = render_export(rows, cols, fmt, title)
     name = re.sub(r"[^\w]+", "-", title.lower()).strip("-")
     return web.Response(text=text, content_type=ctype, charset="utf-8",
@@ -552,6 +609,9 @@ def create_app(settings, tgm, bus, stop_event, desktop_status, local_only=True):
     r.add_post("/api/jobs", job_start)
     r.add_get("/api/jobs/{id}", job_get)
     r.add_post("/api/jobs/{id}/cancel", job_cancel)
+    r.add_post("/api/chats/join", chat_join)
+    r.add_get("/api/context", context)
+    r.add_get("/api/photo/{id}/{idx}", profile_photo)
     r.add_delete("/api/jobs/{id}", job_delete)
     r.add_get("/api/entities", entities)
     r.add_get("/api/archive", archive)

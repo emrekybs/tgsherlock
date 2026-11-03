@@ -114,7 +114,7 @@ const num = (n) => Number(n || 0).toLocaleString('en-US');
 function bytes(n) { if (!n) return '0 B'; const u = ['B', 'KB', 'MB', 'GB']; let i = 0; while (n >= 1024 && i < 3) { n /= 1024; i++; } return `${n.toFixed(i ? 1 : 0)} ${u[i]}`; }
 const RISK_LABEL = { high: 'High risk', watch: 'Watch', clean: 'Clean' };
 const SEV_LABEL = { high: 'High', medium: 'Medium', low: 'Low' };
-const SOURCE_LABEL = { live: 'Live', alert: 'Alert', history: 'History', sweep: 'Sweep', tracker: 'Tracker' };
+const SOURCE_LABEL = { live: 'Live monitor', alert: 'Alert rule', history: 'Group history', sweep: 'Keyword sweep', tracker: 'User tracker', profile: 'Profile scan' };
 const ENTITY_TYPES = ['Email', 'Phone', 'URL', 'IP', 'Crypto wallet', 'Invite link', 'Username', 'Hashtag'];
 
 // ===========================================================================
@@ -295,6 +295,198 @@ function mediaBlock(m) {
   return m.media_url
     ? h('a', { class: 'badge', href: m.media_url, target: '_blank', rel: 'noopener' }, icon('clip', 12, 2), label)
     : h('span', { class: 'badge' }, icon('clip', 12, 2), label);
+}
+
+// ===========================================================================
+// message detail drawer + conversation
+// ===========================================================================
+const URL_RX = /https?:\/\/[^\s<>"'()\[\]]+/g;
+function tgLink(m) {
+  if (!m || !m.msg_id) return null;
+  const cid = String(m.chat_id || '');
+  if (m.chat_username) return `https://t.me/${m.chat_username}/${m.msg_id}`;
+  if (cid.startsWith('-100')) return `https://t.me/c/${cid.slice(4)}/${m.msg_id}`;
+  return null;
+}
+function linkChips(text, preview) {
+  const urls = [...new Set(String(text || '').match(URL_RX) || [])].slice(0, 8);
+  const out = urls.map((u) => h('a', { class: 'link-chip', href: u, target: '_blank', rel: 'noopener noreferrer', title: u }, icon('ext', 12), u.replace(/^https?:\/\//, '')));
+  if (preview && preview.url && !urls.includes(preview.url)) {
+    out.unshift(h('a', { class: 'link-chip', href: preview.url, target: '_blank', rel: 'noopener noreferrer', title: preview.url }, icon('clip', 12), [preview.site, preview.title].filter(Boolean).join(' · ') || preview.url));
+  }
+  return out;
+}
+let drawerEl = null;
+function drawerKey(e) { if (e.key === 'Escape') closeDrawer(); }
+function closeDrawer() { if (drawerEl) { drawerEl.remove(); drawerEl = null; document.removeEventListener('keydown', drawerKey); } }
+function openMessage(m, terms) {
+  closeDrawer();
+  const x = m.extra || {};
+  const link = tgLink(m);
+  const meta = [
+    ['Time', fmtDate(m.date, true)],
+    ['Time (UTC)', m.date],
+    ['Chat', m.chat_title || '—'],
+    ['Chat type', m.chat_type || '—'],
+    ['Chat ID', m.chat_id, true],
+    m.chat_username ? ['Chat username', '@' + m.chat_username] : null,
+    ['Sender', m.sender_name || '—'],
+    ['Username', m.sender_username ? '@' + m.sender_username : '—'],
+    ['Sender ID', m.sender_id, true],
+    ['Message ID', m.msg_id, true],
+    x.views != null ? ['Views', num(x.views)] : null,
+    x.forwards ? ['Forwards', num(x.forwards)] : null,
+    x.replies ? ['Replies', num(x.replies)] : null,
+    x.reply_to ? ['Reply to message', '#' + x.reply_to] : null,
+    x.topic_id ? ['Forum topic', '#' + x.topic_id] : null,
+    x.fwd_from ? ['Forwarded from', x.fwd_from + (x.fwd_date ? ` · ${fmtDate(x.fwd_date)}` : '')] : null,
+    x.post_author ? ['Signed by', x.post_author] : null,
+    x.via_bot ? ['Sent via bot', x.via_bot] : null,
+    x.edited ? ['Edited', fmtDate(x.edited, true)] : null,
+    (x.file_name || x.mime) ? ['File', [x.file_name, x.mime, x.file_size ? bytes(x.file_size) : null].filter(Boolean).join(' · ')] : (m.media ? ['Media', m.media] : null),
+    x.album ? ['Album', String(x.album)] : null,
+    x.pinned ? ['Pinned', 'Yes'] : null,
+    x.protected ? ['Protected content', 'Yes'] : null,
+    m.risk ? ['Risk', riskBadge(m.risk)] : null,
+    m.source ? ['Collected by', SOURCE_LABEL[m.source] || m.source] : null,
+    m.captured_at ? ['Captured', fmtDate(m.captured_at, true)] : null,
+  ].filter(Boolean);
+  const metaList = h('dl', { class: 'meta-list' }, meta.map(([k, v, copy]) => [h('dt', null, k),
+    h('dd', null, v instanceof Node ? v : String(v == null || v === '' ? '—' : v), copy && v != null && v !== '' ? copyBtn(v) : null)]));
+  const convo = h('div');
+  const acts = h('div', { class: 'drawer-acts' },
+    link ? h('a', { class: 'btn sm primary', href: link, target: '_blank', rel: 'noopener noreferrer' }, icon('ext', 14), 'Open in Telegram') : null,
+    m.text ? h('button', { class: 'btn sm', type: 'button', onclick: () => copyText(m.text) }, icon('copy', 14), 'Copy text') : null,
+    link ? h('button', { class: 'btn sm', type: 'button', onclick: () => copyText(link) }, icon('copy', 14), 'Copy link') : null,
+    m.sender_id > 0 ? h('button', { class: 'btn sm', type: 'button', onclick: () => { closeDrawer(); go('profile', { q: m.sender_username ? '@' + m.sender_username : String(m.sender_id) }); } }, icon('profile', 14), 'Sender profile') : null,
+    m.chat_id && String(m.chat_id).startsWith('-') ? h('button', { class: 'btn sm', type: 'button', onclick: () => { closeDrawer(); go('history', { target: m.chat_username ? '@' + m.chat_username : String(m.chat_id) }); } }, icon('history', 14), 'Chat history') : null);
+  drawerEl = h('div', { class: 'drawer-bg', onclick: (e) => { if (e.target === drawerEl) closeDrawer(); } },
+    h('aside', { class: 'drawer', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Message details' },
+      h('div', { class: 'drawer-head' },
+        h('div', { style: 'display:flex;gap:12px;align-items:center;min-width:0' }, avatar(m.sender_id, m.sender_name, 40),
+          h('div', { style: 'min-width:0' }, h('h2', null, m.sender_name || 'Message'), h('p', null, `${m.chat_title || 'Private chat'} · ${fmtDate(m.date, true)}`))),
+        h('button', { class: 'icon-btn', type: 'button', 'aria-label': 'Close', onclick: closeDrawer }, icon('x', 16, 2.2))),
+      acts,
+      h('div', { class: 'drawer-body' },
+        h('section', null, h('div', { class: 'sec-t' }, 'Content'),
+          h('div', { class: 'content-box' }, m.text ? highlight(m.text, terms) : h('span', { class: 'muted' }, `[${m.media || 'no text'}]`)),
+          h('div', { class: 'chip-row' }, linkChips(m.text, x.link_preview), (m.entities || []).filter((v) => !/^https?:/.test(v)).map((v) => h('span', { class: 'ent', title: v }, v))),
+          m.media_url ? h('div', { style: 'margin-top:10px' }, mediaBlock(m)) : null),
+        h('section', null, h('div', { class: 'sec-t' }, 'Metadata'), metaList),
+        h('section', null, h('div', { class: 'sec-t' }, 'Conversation', h('span', { style: 'text-transform:none;letter-spacing:0;font-weight:400' }, 'Message context and thread')), convo))));
+  document.body.appendChild(drawerEl);
+  document.addEventListener('keydown', drawerKey);
+  drawerEl.querySelector('.icon-btn').focus();
+  loadConversation(m, convo, terms);
+}
+async function loadConversation(m, box, terms) {
+  if (!m.chat_id || !m.msg_id) { box.appendChild(h('p', { class: 'hint' }, 'No conversation available for this item.')); return; }
+  box.appendChild(loading('Loading conversation from Telegram…'));
+  const list = h('div', { class: 'convo-list' });
+  let firstId = null, lastDay = null;
+  const moreBtn = h('button', { class: 'btn ghost sm', type: 'button', style: 'align-self:center' }, '↑ Load earlier messages');
+  function bubble(c) {
+    return h('div', { class: 'bubble' + (c.focus ? ' focus' : '') }, avatar(c.sender_id, c.sender_name, 32),
+      h('button', { class: 'b-body', type: 'button', onclick: () => { if (!c.focus) openMessage(c, terms); } },
+        h('div', { class: 'b-head' }, h('b', null, c.sender_name || 'Unknown'), h('span', { class: 'mono muted small' }, fmtTime(c.date, true)),
+          c.focus ? badge('accent', 'This message') : null, c.extra && c.extra.fwd_from ? h('span', { class: 'muted small' }, `↪ ${c.extra.fwd_from}`) : null),
+        h('div', { class: 'b-text' }, c.text ? highlight(c.text, terms) : h('span', { class: 'muted' }, `[${c.media || 'media'}]`)),
+        h('div', { class: 'chip-row' }, c.media ? h('span', { class: 'badge' }, icon('clip', 12, 2), (c.extra && c.extra.file_name) || c.media) : null, linkChips(c.text, c.extra && c.extra.link_preview))));
+  }
+  function render(msgs, prepend) {
+    const frag = document.createDocumentFragment();
+    let day = prepend ? null : lastDay;
+    msgs.forEach((c) => { const d = fmtDay(c.date); if (d !== day) { day = d; frag.appendChild(h('div', { class: 'convo-day' }, d)); } frag.appendChild(bubble(c)); });
+    if (prepend) { const firstDay = list.querySelector('.convo-day'); if (firstDay && firstDay.textContent === day) firstDay.remove(); list.prepend(frag); }
+    else { list.appendChild(frag); lastDay = day; }
+    if (msgs.length) firstId = Math.min(firstId || Infinity, ...msgs.map((c) => c.msg_id));
+  }
+  try {
+    const d = await api('/context?' + qs({ chat_id: m.chat_id, msg_id: m.msg_id, before: 15, after: 5 }));
+    clear(box);
+    if (!d.messages.length) { box.appendChild(h('p', { class: 'hint' }, 'Telegram returned no messages around this one.')); return; }
+    render(d.messages);
+    moreBtn.hidden = !d.has_more;
+    moreBtn.addEventListener('click', () => busy(moreBtn, async () => {
+      const e = await api('/context?' + qs({ chat_id: m.chat_id, msg_id: firstId, before: 20, after: -1 }));
+      render(e.messages, true);
+      moreBtn.hidden = !e.has_more;
+    }));
+    const scroller = h('div', { class: 'scroll-box', style: 'position:relative;max-height:560px' }, h('div', { class: 'stack' }, moreBtn, list));
+    box.append(scroller);
+    const f = list.querySelector('.bubble.focus');
+    if (f) requestAnimationFrame(() => { scroller.scrollTop = Math.max(0, f.offsetTop - scroller.clientHeight / 2 + f.offsetHeight / 2); });
+  } catch (e) {
+    clear(box).appendChild(h('p', { class: 'hint' }, `Conversation unavailable: ${e.message}`));
+  }
+}
+function tabbed(kind, tabs) {
+  S.resTab = S.resTab || {};
+  const avail = tabs.filter(Boolean);
+  let cur = avail.some((t) => t[0] === S.resTab[kind]) ? S.resTab[kind] : avail[0][0];
+  const head = h('div', { class: 'tabs', role: 'tablist' });
+  const slot = h('div', { class: 'stack', style: 'gap:12px' });
+  function paint() {
+    clear(head);
+    avail.forEach(([k, label]) => head.appendChild(h('button', { type: 'button', role: 'tab', 'aria-selected': String(k === cur), onclick: () => { cur = k; S.resTab[kind] = k; paint(); } }, label)));
+    clear(slot).appendChild(avail.find((t) => t[0] === cur)[2]());
+  }
+  paint();
+  return h('section', { class: 'card' }, head, slot);
+}
+function sendersPane(j) {
+  if (!j.senders || !j.senders.length) return empty('No senders yet.', 'users');
+  const total = j.senders.reduce((a, s) => a + s.n, 0) || 1;
+  return h('div', { class: 'tbl-wrap' }, h('table', { class: 'tbl' },
+    h('thead', null, h('tr', null, ['#', 'Sender', 'Messages', 'Share', 'First message', 'Last message', ''].map((c) => h('th', null, c)))),
+    h('tbody', null, j.senders.map((s, i) => h('tr', null,
+      h('td', { class: 'mono muted' }, String(i + 1)),
+      h('td', null, who(s.sender_id, s.sender_name, s.sender_username, 28)),
+      h('td', { class: 'mono' }, num(s.n)),
+      h('td', null, h('div', { class: 'share', title: `${Math.round((s.n / total) * 100)}%` }, h('i', { style: `width:${(s.n / j.senders[0].n) * 100}%` }))),
+      h('td', { class: 'date' }, fmtDate(s.first)), h('td', { class: 'date' }, fmtDate(s.last)),
+      h('td', null, s.sender_id > 0 ? h('button', { class: 'btn sm', type: 'button', onclick: () => go('profile', { q: s.sender_username ? '@' + s.sender_username : String(s.sender_id) }) }, 'Profile') : null))))));
+}
+function activityPane(j) {
+  const days = j.per_day || [];
+  if (!days.length) return empty('No activity yet.', 'clock');
+  const mx = Math.max(1, ...days.map((d) => d.n));
+  const bars = h('div', { class: 'bars', role: 'img', 'aria-label': 'Messages per day' }, days.map((d) => {
+    const b = h('div', { class: 'bar', style: `height:${Math.max(3, (d.n / mx) * 100)}%`, title: `${d.day} · ${d.n} messages, ${d.high || 0} high risk` });
+    if (d.high) b.appendChild(h('i', { style: `height:${(d.high / d.n) * 100}%` }));
+    return b;
+  }));
+  const mid = days[Math.floor(days.length / 2)];
+  return h('div', { class: 'stack', style: 'gap:14px' },
+    h('div', { class: 'card-head' }, h('b', null, `Messages per day · ${days.length} days`), h('div', { class: 'legend' }, h('span', null, h('i', { style: 'background:#2C6E78' }), 'All'), h('span', null, h('i', { style: 'background:var(--red)' }), 'High risk'))),
+    bars, h('div', { class: 'axis' }, h('span', null, days[0].day), h('span', null, mid.day), h('span', null, days[days.length - 1].day)),
+    (j.media_stats || []).length ? h('div', { style: 'display:flex;gap:6px;flex-wrap:wrap;align-items:center' }, h('span', { class: 'muted small' }, 'Media:'), j.media_stats.map((s) => badge('', `${s.media} · ${num(s.n)}`))) : null);
+}
+function membersPane(j) {
+  const all = j.members || [];
+  const note = j.info && j.info.members_note ? h('div', { class: 'banner info' }, icon('info', 16), j.info.members_note) : null;
+  if (!all.length) return h('div', { class: 'stack' }, note, empty('No members could be listed.', 'users'));
+  const f = input({ placeholder: 'Filter by name, @username, ID or role…', 'aria-label': 'Filter members' });
+  const slot = h('div');
+  function paint() {
+    const q = f.value.trim().toLowerCase();
+    const list = q ? all.filter((m) => [m.name, m.username, String(m.user_id), m.role, m.phone].join(' ').toLowerCase().includes(q)) : all;
+    clear(slot).appendChild(h('div', { class: 'tbl-wrap' }, h('table', { class: 'tbl' },
+      h('thead', null, h('tr', null, ['Member', 'User ID', 'Role', 'Joined', 'Last seen', 'Flags', ''].map((c) => h('th', null, c)))),
+      h('tbody', null, list.slice(0, 1500).map((m) => h('tr', null,
+        h('td', null, h('div', { class: 'who' }, avatar(m.user_id, m.name, 30, m.photo), h('div', { class: 'nm' }, h('b', { title: m.name }, m.name), h('span', null, [m.username ? '@' + m.username : null, m.phone ? '+' + m.phone : null].filter(Boolean).join(' · ') || '—')))),
+        h('td', { class: 'mono' }, String(m.user_id), copyBtn(m.user_id)),
+        h('td', null, /Creator|Admin/.test(m.role) ? badge('accent', m.role) : h('span', { class: 'muted' }, m.role)),
+        h('td', { class: 'date' }, m.joined ? fmtDate(m.joined) : '—'),
+        h('td', { class: 'small muted nowrap' }, m.seen_at ? `${rel(m.seen_at)}` : m.status.replace('Last seen ', '')),
+        h('td', null, h('div', { style: 'display:flex;gap:4px;flex-wrap:wrap' }, m.flags.map((x) => badge(['Scam', 'Fake', 'Deleted'].includes(x) ? 'high' : 'accent', x)))),
+        h('td', null, h('button', { class: 'btn sm', type: 'button', onclick: () => go('profile', { q: m.username ? '@' + m.username : String(m.user_id) }) }, 'Profile'))))))));
+    if (list.length > 1500) slot.appendChild(h('p', { class: 'hint' }, `Showing 1,500 of ${num(list.length)} — export for all.`));
+  }
+  f.addEventListener('input', paint);
+  paint();
+  return h('div', { class: 'stack', style: 'gap:12px' }, note,
+    h('div', { class: 'card-head' }, h('div', { style: 'flex:1 1 280px;max-width:420px' }, f), h('div', { style: 'display:flex;gap:6px;flex-wrap:wrap' }, exportBtns({ scope: 'members', id: j.id }))), slot);
 }
 
 // ===========================================================================
@@ -584,7 +776,7 @@ VIEWS.dashboard = async (el, alive) => {
   if (d.hits.length) {
     el.appendChild(card(cardHead('Recent high-risk messages'), h('div', { class: 'tbl-wrap' }, h('table', { class: 'tbl' },
       h('thead', null, h('tr', null, ['Date', 'Chat', 'Sender', 'Keyword', 'Message'].map((c) => h('th', null, c)))),
-      h('tbody', null, d.hits.map((m) => h('tr', null,
+      h('tbody', null, d.hits.map((m) => h('tr', { class: 'click', title: 'Click for details', onclick: () => openMessage(m, m.keyword ? [m.keyword] : []) },
         h('td', { class: 'date' }, fmtDate(m.date)), h('td', null, m.chat_title),
         h('td', null, who(m.sender_id, m.sender_name, m.sender_username, 26)),
         h('td', null, m.keyword ? h('span', { class: 'chip red' }, m.keyword) : '—'),
@@ -670,6 +862,7 @@ VIEWS.live = async (el, alive) => {
           h('span', { class: 't', title: fmtDate(m.date, true) }, fmtTime(m.date, true))),
         m.text ? h('p', null, m.text) : null,
         h('div', { class: 'foot' }, riskBadge(m.risk), mediaBlock(m), (m.entities || []).map((x) => h('span', { class: 'ent', title: x }, x)),
+          h('button', { class: 'btn ghost sm', type: 'button', onclick: () => openMessage(m) }, 'Details'),
           m.sender_id ? h('button', { class: 'btn ghost sm', type: 'button', onclick: () => go('profile', { q: String(m.sender_id) }) }, 'Profile') : null)));
   }
   function paintStats() {
@@ -827,6 +1020,7 @@ VIEWS.alerts = async (el, alive) => {
           h('div', { style: 'display:flex;flex-wrap:wrap;gap:8px;align-items:center;font-size:12px' },
             h('span', { class: 'muted' }, 'Rule: ', h('span', { style: 'color:var(--text-2)' }, a.rule_name)),
             a.channels.map((c) => badge(/failed/i.test(c) ? 'high' : 'clean', c)),
+            a.msg_id && a.chat_id ? h('button', { class: 'btn ghost sm', type: 'button', onclick: () => openMessage({ chat_id: a.chat_id, msg_id: a.msg_id, chat_title: a.chat_title, sender_id: a.sender_id, sender_name: a.sender_name, date: a.date, text: a.text, source: 'alert' }) }, 'Details') : null,
             a.sender_id ? h('button', { class: 'btn ghost sm', type: 'button', onclick: () => go('profile', { q: String(a.sender_id) }) }, 'Sender profile') : null)),
         a.read ? null : markBtn));
     });
@@ -881,53 +1075,87 @@ VIEWS.profile = async (el, alive) => {
   if (q.value.trim() && (pre || S.lastProfile)) run(); else q.focus();
 };
 function renderProfile(p, slot) {
-  const flags = Object.entries({ Bot: p.flags.bot, Premium: p.flags.premium, Verified: p.flags.verified, Scam: p.flags.scam, Fake: p.flags.fake, Restricted: p.flags.restricted, 'In my contacts': p.flags.contact }).filter(([, v]) => v);
+  const X = p.extra || {};
+  const flags = Object.entries({ Bot: p.flags.bot, Premium: p.flags.premium, Verified: p.flags.verified, Scam: p.flags.scam, Fake: p.flags.fake, Restricted: p.flags.restricted, 'In my contacts': p.flags.contact, 'Mutual contact': X.mutual_contact, 'Blocked by me': X.blocked }).filter(([, v]) => v);
   const ident = p.usernames[0] || String(p.id);
+  const uname = (p.usernames[0] || '').replace(/^@/, '');
   const watchBtn = h('button', { class: 'btn', type: 'button', disabled: p.watched }, icon('live', 16), p.watched ? 'In live monitor' : 'Add to live monitor');
   watchBtn.addEventListener('click', () => busy(watchBtn, async () => { await api('/live/targets', { body: { query: String(p.id) } }); toast(`${p.name} added to the live monitor.`, 'ok'); p.watched = true; }).then(() => { if (p.watched) { watchBtn.disabled = true; watchBtn.lastChild.textContent = 'In live monitor'; } }));
+  const kvRow = (k, v, mono) => h('div', null, h('span', null, k), h('span', { class: mono ? 'mono small' : null }, v == null || v === '' ? '—' : v));
   const left = h('section', { class: 'card grow-1', style: 'gap:18px' },
     h('div', { class: 'profile-head' }, avatar(p.id, p.name, 76, p.photo, true),
       h('div', { class: 'names' }, h('b', null, p.name),
         p.usernames.length ? h('span', { class: 'mono', style: 'color:var(--accent-text);word-break:break-all' }, p.usernames.join('  ')) : h('span', { class: 'muted small' }, 'No public username'),
         h('span', { class: 'muted small' }, p.status + (p.seen_at ? ` ${rel(p.seen_at)} (${fmtDate(p.seen_at)})` : '')))),
     p.bio ? h('p', { class: 'bio' }, p.bio) : null,
+    (X.restrictions || []).length ? h('div', { class: 'banner err' }, icon('alert', 16), X.restrictions.join(' · ')) : null,
     h('div', { class: 'kv' },
       h('div', null, h('span', null, 'User ID'), h('span', { class: 'mono' }, String(p.id), copyBtn(p.id, 'Copy user ID'))),
-      h('div', null, h('span', null, 'Phone'), h('span', null, p.phone ? '+' + p.phone : 'Hidden')),
-      h('div', null, h('span', null, 'Shared groups'), h('span', null, num(p.common_count))),
-      h('div', null, h('span', null, 'Profile photos'), h('span', null, num(p.photos))),
-      h('div', null, h('span', null, 'Messages captured'), h('span', null, num(p.totals && p.totals.n))),
-      h('div', null, h('span', null, 'Data center'), h('span', null, p.dc ? 'DC' + p.dc : '—')),
-      h('div', null, h('span', null, 'First captured'), h('span', { class: 'mono small' }, p.totals && p.totals.first ? fmtDate(p.totals.first) : '—')),
-      h('div', null, h('span', null, 'Last captured'), h('span', { class: 'mono small' }, p.totals && p.totals.last ? fmtDate(p.totals.last) : '—'))),
+      kvRow('Phone', p.phone ? '+' + p.phone : 'Hidden'),
+      kvRow('First name', p.first_name), kvRow('Last name', p.last_name),
+      kvRow('Shared groups', num(p.common_count)), kvRow('Profile photos', num(p.photos)),
+      kvRow('Messages captured', num(p.totals && p.totals.n)), kvRow('Data center', p.dc ? 'DC' + p.dc : null),
+      kvRow('First captured', p.totals && p.totals.first ? fmtDate(p.totals.first) : null, true),
+      kvRow('Last captured', p.totals && p.totals.last ? fmtDate(p.totals.last) : null, true),
+      X.birthday ? kvRow('Birthday', X.birthday) : null,
+      X.lang ? kvRow('Language', X.lang) : null,
+      X.forward_name ? kvRow('Forwards shown as', X.forward_name) : null,
+      X.business_address ? kvRow('Business address', X.business_address) : null,
+      X.bot_users ? kvRow('Monthly bot users', num(X.bot_users)) : null,
+      X.personal_channel ? h('div', null, h('span', null, 'Personal channel'), h('button', { class: 'btn ghost sm', style: 'padding:0;height:auto;justify-content:flex-start', type: 'button', onclick: () => go('history', { target: X.personal_channel.username ? '@' + X.personal_channel.username : String(X.personal_channel.id) }) }, X.personal_channel.title)) : null),
     h('div', { style: 'display:flex;flex-wrap:wrap;gap:6px' }, flags.length ? flags.map(([k]) => badge(['Scam', 'Fake', 'Restricted'].includes(k) ? 'high' : 'accent', k)) : badge('', 'No special flags')),
     h('div', { style: 'display:flex;flex-wrap:wrap;gap:8px' },
       h('button', { class: 'btn primary', type: 'button', onclick: () => go('tracker', { target: String(p.id), auto: true }) }, icon('tracker', 16), 'Track across groups'),
       watchBtn,
       h('button', { class: 'btn', type: 'button', onclick: () => { S.editRule = { name: `${p.name} activity`, watch: 'user', target: ident, severity: 'medium' }; S.alertTab = 'rules'; go('alerts'); } }, icon('bell', 16), 'Create alert')));
 
+  const status = (c) => [c.member ? badge('clean', 'Shared') : null, c.listed ? badge('accent', 'In member list') : null, c.posts ? badge('', 'Posted') : null].filter(Boolean);
   const seen = p.seen_in.length
     ? h('div', { class: 'tbl-wrap' }, h('table', { class: 'tbl' },
-      h('thead', null, h('tr', null, ['Chat', 'With you', 'Msgs', 'First seen', 'Last seen'].map((c) => h('th', null, c)))),
-      h('tbody', null, p.seen_in.map((c) => h('tr', null,
-        h('td', null, h('div', { class: 'who' }, avatar(c.id, c.title, 28), h('div', { class: 'nm' }, h('b', { title: c.title }, c.title), h('span', null, [c.kind, c.username ? '@' + c.username : '', c.members ? `${num(c.members)} members` : ''].filter(Boolean).join(' · '))))),
-        h('td', null, c.member ? badge('clean', 'Shared') : badge('', 'Messages only')),
-        h('td', { class: 'mono' }, num(c.posts)),
-        h('td', { class: 'date' }, c.first ? fmtDate(c.first) : '—'),
-        h('td', { class: 'date' }, c.last ? fmtDate(c.last) : '—'))))))
-    : empty('No shared groups and no captured messages yet.', 'users');
+      h('thead', null, h('tr', null, ['Chat', 'Found via', 'Joined', 'Their messages'].map((c) => h('th', null, c)))),
+      h('tbody', null, p.seen_in.map((c) => h('tr', { class: 'click', title: 'Open group history', onclick: () => go('history', { target: c.username ? '@' + c.username : String(c.id) }) },
+        h('td', null, h('div', { class: 'who' }, avatar(c.id, c.title, 28), h('div', { class: 'nm' }, h('b', { title: c.title }, c.title), h('span', null, [c.kind, c.username ? '@' + c.username : '', c.members ? `${num(c.members)} members` : '', c.role && c.role !== 'Member' ? c.role : ''].filter(Boolean).join(' · '))))),
+        h('td', null, h('div', { style: 'display:flex;flex-direction:column;gap:4px;align-items:flex-start' }, status(c))),
+        h('td', { class: 'date' }, c.joined ? fmtDay(c.joined) : '—'),
+        h('td', null, c.posts ? h('div', { style: 'display:flex;flex-direction:column;gap:2px' }, h('span', { class: 'mono', style: 'color:var(--text)' }, `${num(c.posts)} msgs`),
+          h('span', { class: 'date', title: `First: ${fmtDate(c.first, true)}` }, `first ${fmtDay(c.first)}`), h('span', { class: 'date', title: `Last: ${fmtDate(c.last, true)}` }, `last  ${fmtDay(c.last)}`)) : h('span', { class: 'muted' }, '—')))))))
+    : empty('No shared groups, member-list matches or captured messages yet.', 'users');
+
+  const hist = (p.identity_history || []);
+  const histCard = card(cardHead('Name & username history', h('span', { class: 'muted small' }, `${hist.length} observed`)),
+    hist.length ? h('div', { class: 'tbl-wrap' }, h('table', { class: 'tbl' },
+      h('thead', null, h('tr', null, ['Display name', 'Username', 'First seen', 'Last seen', 'Seen via'].map((c) => h('th', null, c)))),
+      h('tbody', null, hist.map((r) => h('tr', null,
+        h('td', { style: 'color:var(--text)' }, r.name || '—'),
+        h('td', { class: 'mono' }, r.username ? '@' + r.username : '—'),
+        h('td', { class: 'date' }, fmtDate(r.first_seen)), h('td', { class: 'date' }, fmtDate(r.last_seen)),
+        h('td', { class: 'small muted' }, (r.sources || '').split(',').join(', '))))))) : null,
+    h('p', { class: 'hint' }, 'Telegram does not publish old usernames. TGSherlock records every name and username it sees (messages, member lists, searches, lookups), so changes show up here from the first time it saw this account.'));
+
+  const photos = p.photo_list || [];
+  const gallery = photos.length ? card(cardHead('Profile photo history', h('span', { class: 'muted small' }, `${num(p.photos)} total`)),
+    h('div', { class: 'gallery' }, photos.map((ph) => h('figure', null,
+      h('a', { href: `/api/photo/${p.id}/${ph.index}`, target: '_blank', rel: 'noopener' }, h('img', { src: `/api/photo/${p.id}/${ph.index}`, alt: `Profile photo set ${fmtDay(ph.date)}`, loading: 'lazy' })),
+      h('figcaption', null, (ph.video ? '▶ ' : '') + fmtDay(ph.date)))))) : null;
+
+  const bot = X.bot_description || (X.bot_commands || []).length ? card(cardHead('Bot information'),
+    X.bot_description ? h('p', { class: 'bio' }, X.bot_description) : null,
+    (X.bot_commands || []).length ? h('div', null, X.bot_commands.map((c) => h('div', { class: 'list-item' }, h('span', { class: 'cmd' }, '/' + c.command), h('span', { class: 'muted' }, c.description)))) : null) : null;
+
   const right = h('div', { class: 'grow-2 stack', style: 'gap:16px' },
     card(cardHead('Groups & channels', h('span', { class: 'muted small' }, `${p.seen_in.length} found`)), seen,
-      h('p', { class: 'hint' }, 'Telegram only reveals groups you share with this user. Chats where you captured their messages are listed too — run “Track across groups” to scan message history with dates.')),
-    card(cardHead('Activity by hour (your local time)'), heatStrip(p.hours_utc)));
-  slot.appendChild(h('div', { class: 'row' }, left, right));
+      h('p', { class: 'hint' }, `Combines groups Telegram reports as shared with you, member lists you collected in Group History, and chats where they posted.${p.scanned ? ` Fetched ${num(p.scanned)} recent messages from shared groups.` : ''}`)),
+    card(cardHead('Activity by hour (your local time)'), heatStrip(p.hours_utc)),
+    histCard);
+  slot.appendChild(h('div', { class: 'row' }, h('div', { class: 'grow-1 stack', style: 'gap:16px' }, left, bot, gallery), right));
 
   const tl = h('div', { class: 'timeline scroll-box' });
   let day = null;
   p.recent.forEach((m) => {
     const dday = fmtDay(m.date);
     if (dday !== day) { day = dday; tl.appendChild(h('div', { class: 'tl-day' }, dday)); }
-    tl.appendChild(h('div', { class: 'tl-item' }, h('span', { class: 'tm', title: fmtDate(m.date, true) }, fmtTime(m.date)),
+    const full = Object.assign({ sender_id: p.id, sender_name: p.name, sender_username: uname }, m);
+    tl.appendChild(h('div', { class: 'tl-item click', title: 'Click for details', onclick: () => openMessage(full) }, h('span', { class: 'tm', title: fmtDate(m.date, true) }, fmtTime(m.date)),
       h('div', { class: 'tx' }, h('span', null, m.chat_title), h('p', null, m.text || `[${m.media || 'media'}]`))));
   });
   slot.appendChild(card(cardHead('Message timeline', h('span', { class: 'muted small' }, `${num(p.recent.length)} most recent`)),
@@ -990,7 +1218,7 @@ function msgTable(rows, cols, terms) {
   };
   return h('div', { class: 'tbl-wrap' }, h('table', { class: 'tbl' },
     h('thead', null, h('tr', null, cols.map((c) => h('th', null, defs[c][0])))),
-    h('tbody', null, rows.map((m) => h('tr', null, cols.map((c) => defs[c][1](m)))))));
+    h('tbody', null, rows.map((m) => h('tr', { class: 'click', title: 'Click for details', onclick: (e) => { if (!e.target.closest('button,a')) openMessage(m, terms); } }, cols.map((c) => defs[c][1](m)))))));
 }
 function dateInput(value) { return h('input', { class: 'input', type: 'date', value: value || '' }); }
 
@@ -1040,10 +1268,11 @@ function jobView(kind, cfg) {
       paintInfo(job.info);
       jobSlot.appendChild(body);
       updateWait(job.wait_until);
-      if (job.rows && job.rows.length) jobSlot.appendChild(cfg.results(job));
+      if ((job.rows && job.rows.length) || (job.members && job.members.length)) jobSlot.appendChild(cfg.results(job));
       else if (!running && job.status === 'done' && !(job.info && job.info.note)) jobSlot.appendChild(empty('No messages matched.', 'search'));
     }
-    function paintInfo(info) { if (ui) clear(ui.infoSlot).appendChild(cfg.info(info || {}) || h('span')); }
+    async function rerun(params) { const r = await api('/jobs', { body: { kind, params } }); S.jobs[kind] = r.id; await openJob(r.id); loadRuns(); }
+    function paintInfo(info) { if (ui) clear(ui.infoSlot).appendChild(cfg.info(info || {}, { job: ui.job, rerun }) || h('span')); }
     function pct(p) { return p && p.total ? Math.min(100, Math.round((p.done / p.total) * 100)) : 0; }
     let waitTimer = null;
     function updateWait(until) {
@@ -1097,22 +1326,44 @@ VIEWS.history = jobView('history', {
     const target = input({ class: 'input mono', placeholder: 't.me/channel, @group, invite link or ID', value: pre ? pre.target : '' });
     const from = dateInput(); const to = dateInput();
     const limit = input({ type: 'number', min: 1, max: 50000, value: 500 });
+    let withMembers = true;
+    const memSwitch = switchBtn(true, 'Include member list', (v) => { withMembers = v; });
     const btn = h('button', { class: 'btn primary lg', type: 'submit' }, 'Fetch history');
-    const go_ = () => { if (!target.value.trim()) { target.focus(); return; } start({ target: target.value.trim(), from: from.value, to: to.value, limit: limit.value }, btn); };
+    const go_ = () => { if (!target.value.trim()) { target.focus(); return; } start({ target: target.value.trim(), from: from.value, to: to.value, limit: limit.value, members: withMembers }, btn); };
     const el = h('form', { class: 'card', onsubmit: (e) => { e.preventDefault(); go_(); } },
       h('div', { class: 'form' }, field('Group or channel', target, 'wide'), field('From', from), field('To', to), field('Max messages', limit, 'narrow'), btn),
-      h('p', { class: 'hint' }, 'Reads newest → oldest. Private invite links show a preview until you join the chat in Telegram.'));
+      h('div', { style: 'display:flex;align-items:center;gap:10px;flex-wrap:wrap' }, memSwitch, h('span', { style: 'color:var(--text-2)' }, 'Include member list'), h('span', { class: 'hint' }, '· Reads messages newest → oldest. Private invite links show a preview until you join.')));
     if (!target.value) setTimeout(() => target.focus(), 0);
     return { el, submit: go_ };
   },
-  info(i) {
+  info(i, ctx) {
     if (!i.title) return null;
+    const joinBtn = !i.joined && ctx && ctx.job ? h('button', { class: 'btn sm primary', type: 'button' }, icon('userplus', 14), 'Join & fetch again') : null;
+    if (joinBtn) joinBtn.addEventListener('click', async () => {
+      if (!(await confirmBox({ title: `Join “${i.title}”?`, text: 'Your account joins this chat (its members can see that). Then the history is fetched again.', ok: 'Join' }))) return;
+      busy(joinBtn, async () => { await api('/chats/join', { body: { target: ctx.job.params.target } }); toast('Joined. Fetching again…', 'ok'); await ctx.rerun(ctx.job.params); });
+    });
     return h('div', { class: 'stack' },
-      h('div', { class: 'tiles' }, smallTile('Title', i.title), smallTile('Type', i.kind), smallTile('Members', i.members != null ? num(i.members) : '—'), smallTile('Username', i.username ? '@' + i.username : '—'), smallTile('Created / joined', i.date ? fmtDay(i.date) : '—')),
+      h('div', { class: 'tiles' }, smallTile('Title', i.title), smallTile('Type', i.kind), smallTile('Members', i.members != null ? num(i.members) : '—'),
+        smallTile('Online now', i.online != null ? num(i.online) : '—'), smallTile('Admins', i.admins != null ? num(i.admins) : '—'),
+        smallTile('Total messages', i.total_messages != null ? num(i.total_messages) : '—'), smallTile('Username', i.username ? '@' + i.username : '—'),
+        smallTile('Created / joined', i.date ? fmtDay(i.date) : '—'), smallTile('Chat ID', String(i.id || '—')),
+        i.slowmode ? smallTile('Slow mode', `${i.slowmode} s`) : null, i.banned ? smallTile('Banned users', num(i.banned)) : null,
+        i.members_fetched != null ? smallTile('Members listed', num(i.members_fetched)) : null),
+      (i.flags && i.flags.length) || i.linked || i.joined === false ? h('div', { style: 'display:flex;gap:6px;flex-wrap:wrap;align-items:center' },
+        i.joined === false ? badge('watch', 'Not joined') : badge('clean', 'Joined'),
+        (i.flags || []).map((f) => badge(['Scam', 'Fake', 'Restricted'].includes(f) ? 'high' : 'accent', f)),
+        i.linked ? h('button', { class: 'btn ghost sm', type: 'button', onclick: () => go('history', { target: i.linked.username ? '@' + i.linked.username : String(i.linked.id) }) }, `Linked ${i.linked.kind.toLowerCase()}: ${i.linked.title}`) : null) : null,
       i.about ? h('p', { class: 'bio' }, i.about) : null,
-      i.note ? h('div', { class: 'banner info' }, icon('info', 16), i.note) : null);
+      (i.restrictions || []).length ? h('div', { class: 'banner err' }, icon('alert', 16), i.restrictions.join(' · ')) : null,
+      i.note ? h('div', { class: 'banner warn' }, icon('info', 16), h('span', { style: 'flex:1' }, i.note), joinBtn) : (joinBtn ? h('div', { class: 'banner info' }, icon('info', 16), h('span', { style: 'flex:1' }, 'You are not a member of this chat.'), joinBtn) : null));
   },
-  results: (j) => card(cardHead(`Messages · ${num(j.count)}`, j.count > j.rows.length ? h('span', { class: 'muted small' }, `showing ${num(j.rows.length)} — export for all`) : null), msgTable(j.rows, ['date', 'sender', 'text', 'media', 'risk'])),
+  results: (j) => tabbed('history', [
+    ['messages', `Messages · ${num(j.count)}`, () => j.rows.length ? h('div', { class: 'stack' }, msgTable(j.rows, ['date', 'sender', 'text', 'media', 'risk']), j.count > j.rows.length ? h('p', { class: 'hint' }, `Showing ${num(j.rows.length)} — export for all.`) : null) : empty('No messages were returned.', 'history')],
+    ['members', `Members · ${num((j.members || []).length)}`, () => membersPane(j)],
+    j.rows.length ? ['senders', 'Top senders', () => sendersPane(j)] : null,
+    j.rows.length ? ['activity', 'Activity', () => activityPane(j)] : null,
+  ]),
 });
 
 VIEWS.sweep = jobView('sweep', {
@@ -1139,8 +1390,11 @@ VIEWS.sweep = jobView('sweep', {
     return { el, submit: go_ };
   },
   info(i) { return i.mode ? h('div', { class: 'tiles' }, smallTile('Mode', { any: 'Any word', all: 'All words', regex: 'Regex' }[i.mode]), smallTile('Scope', i.scope || (i.dialogs ? `${num(i.dialogs)} groups & channels` : '—'))) : null; },
-  results: (j) => card(cardHead(`Results · ${num(j.count)}`, j.count > j.rows.length ? h('span', { class: 'muted small' }, `showing ${num(j.rows.length)} — export for all`) : null),
-    msgTable(j.rows, ['chat', 'date', 'sender', 'text', 'risk'], j.params.mode === 'regex' ? [] : j.params.keywords)),
+  results: (j) => tabbed('sweep', [
+    ['results', `Results · ${num(j.count)}`, () => h('div', { class: 'stack' }, msgTable(j.rows, ['chat', 'date', 'sender', 'text', 'risk'], j.params.mode === 'regex' ? [] : j.params.keywords), j.count > j.rows.length ? h('p', { class: 'hint' }, `Showing ${num(j.rows.length)} — export for all.`) : null)],
+    ['senders', 'Top senders', () => sendersPane(j)],
+    ['activity', 'Activity', () => activityPane(j)],
+  ]),
 });
 
 VIEWS.tracker = jobView('tracker', {
@@ -1163,19 +1417,16 @@ VIEWS.tracker = jobView('tracker', {
     return { el, submit: go_ };
   },
   info(i) { return i.user ? h('div', { class: 'tiles' }, smallTile('User', `${i.user}${i.username ? ' · ' + i.username : ''}`), smallTile('User ID', String(i.user_id)), smallTile('Scope', i.scope), smallTile('Groups to scan', num(i.groups))) : null; },
-  results(j) {
-    const wrap = h('div', { class: 'stack', style: 'gap:16px' });
-    if (j.groups && j.groups.length) {
-      wrap.appendChild(card(cardHead(`Activity per group · ${j.groups.length}`),
-        h('div', { class: 'tbl-wrap' }, h('table', { class: 'tbl' },
-          h('thead', null, h('tr', null, ['Group', 'Messages', 'First message', 'Last message'].map((c) => h('th', null, c)))),
-          h('tbody', null, j.groups.map((g) => h('tr', null,
-            h('td', null, h('div', { class: 'who' }, avatar(g.chat_id, g.chat_title, 26), h('div', { class: 'nm' }, h('b', null, g.chat_title), h('span', null, String(g.chat_id))))),
-            h('td', { class: 'mono' }, num(g.n)), h('td', { class: 'date' }, fmtDate(g.first)), h('td', { class: 'date' }, fmtDate(g.last)))))))));
-    }
-    wrap.appendChild(card(cardHead(`Messages · ${num(j.count)}`, j.count > j.rows.length ? h('span', { class: 'muted small' }, `showing ${num(j.rows.length)} — export for all`) : null), msgTable(j.rows, ['date', 'chat', 'text', 'media', 'risk'])));
-    return wrap;
-  },
+  results: (j) => tabbed('tracker', [
+    ['groups', `Groups · ${num((j.groups || []).length)}`, () => (j.groups || []).length ? h('div', { class: 'tbl-wrap' }, h('table', { class: 'tbl' },
+      h('thead', null, h('tr', null, ['Group', 'Messages', 'First message', 'Last message'].map((c) => h('th', null, c)))),
+      h('tbody', null, j.groups.map((g) => h('tr', { class: 'click', title: 'Open group history', onclick: () => go('history', { target: String(g.chat_id) }) },
+        h('td', null, h('div', { class: 'who' }, avatar(g.chat_id, g.chat_title, 26), h('div', { class: 'nm' }, h('b', null, g.chat_title), h('span', null, String(g.chat_id))))),
+        h('td', { class: 'mono' }, num(g.n)), h('td', { class: 'date' }, fmtDate(g.first)), h('td', { class: 'date' }, fmtDate(g.last)))))))
+      : empty('No messages found in any group yet.', 'users')],
+    ['messages', `Messages · ${num(j.count)}`, () => h('div', { class: 'stack' }, msgTable(j.rows, ['date', 'chat', 'text', 'media', 'risk']), j.count > j.rows.length ? h('p', { class: 'hint' }, `Showing ${num(j.rows.length)} — export for all.`) : null)],
+    ['activity', 'Activity', () => activityPane(j)],
+  ]),
 });
 
 // ===========================================================================
@@ -1216,7 +1467,7 @@ VIEWS.archive = async (el, alive) => {
   const q = input({ placeholder: 'Text, chat, sender or numeric ID', value: f.q });
   const sel = (opts, val) => h('select', { class: 'input', value: val }, opts.map(([v, t]) => h('option', { value: v }, t)));
   const risk = sel([['', 'All levels'], ['high', 'High risk'], ['watch', 'Watch'], ['clean', 'Clean']], f.risk);
-  const source = sel([['', 'All sources'], ['live', 'Live monitor'], ['alert', 'Alert rules'], ['history', 'Group history'], ['sweep', 'Keyword sweep'], ['tracker', 'User tracker']], f.source);
+  const source = sel([['', 'All sources'], ['live', 'Live monitor'], ['alert', 'Alert rules'], ['history', 'Group history'], ['sweep', 'Keyword sweep'], ['tracker', 'User tracker'], ['profile', 'Profile scans']], f.source);
   const days = sel([['', 'All time'], ['1', 'Last 24 hours'], ['7', 'Last 7 days'], ['30', 'Last 30 days'], ['90', 'Last 90 days']], f.days);
   const statsSlot = h('div'); const tableSlot = h('div'); const exportSlot = h('div', { style: 'display:flex;gap:6px;flex-wrap:wrap' });
   const apply = () => { offset = 0; load(); };
@@ -1235,7 +1486,7 @@ VIEWS.archive = async (el, alive) => {
     if (!d.rows.length) { tableSlot.appendChild(empty('Nothing matches these filters.', 'db')); return; }
     tableSlot.appendChild(h('div', { class: 'tbl-wrap' }, h('table', { class: 'tbl' },
       h('thead', null, h('tr', null, ['Date', 'Chat', 'Sender', 'Message', 'Risk', 'Source'].map((c) => h('th', null, c)))),
-      h('tbody', null, d.rows.map((m) => h('tr', null,
+      h('tbody', null, d.rows.map((m) => h('tr', { class: 'click', title: 'Click for details', onclick: () => openMessage(m, params.q && !/^-?\d+$/.test(params.q) ? [params.q] : []) },
         h('td', { class: 'date', title: fmtDate(m.date, true) }, fmtDate(m.date)),
         h('td', { style: 'min-width:130px' }, m.chat_title || '—'),
         h('td', null, who(m.sender_id, m.sender_name, m.sender_username, 26)),
@@ -1385,7 +1636,7 @@ function buildSetup(root) {
     clear(inner);
     if (st.error && !S.addingAccount && A.state === 'idle') inner.appendChild(h('div', { class: 'banner err' }, icon('alert', 16), st.error));
     const state = local || A.state;
-    if (state === 'idle' || state === 'error') paintCreds();
+    if (state === 'idle' || state === 'error' || state === 'done') paintCreds();
     else if (state === 'qr') paintQr();
     else if (state === 'phone') paintPhone();
     else if (state === 'code') paintCode();
@@ -1393,7 +1644,7 @@ function buildSetup(root) {
     const others = (st.accounts || []).filter((a) => !a.active || !st.authorized);
     if (S.addingAccount && st.authorized) {
       inner.appendChild(h('button', { class: 'btn ghost', type: 'button', style: 'align-self:flex-start', onclick: async () => { await api('/auth/cancel', { body: {} }).catch(() => {}); S.addingAccount = false; renderApp(); } }, '← Back to the panel'));
-    } else if (others.length && (A.state === 'idle' || A.state === 'error')) {
+    } else if (others.length && ['idle', 'error', 'done'].includes(A.state)) {
       inner.appendChild(h('div', { class: 'card tight' }, h('div', { class: 'lab muted small' }, 'Saved accounts'),
         others.map((a) => h('div', { class: 'list-item' }, avatar(a.id, a.name, 32, false),
           h('div', { class: 'grow' }, h('b', null, a.name), h('span', null, a.username ? '@' + a.username : `ID ${a.id}`)),

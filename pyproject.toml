@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tgsherlock"
-version = "1.0.0"
+dynamic = ["version"]
 description = "Local web panel for Telegram OSINT: live monitoring, alerts, user tracking and keyword sweeps."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -25,6 +25,9 @@ dependencies = [
 
 [project.scripts]
 tgsherlock = "tgsherlock.cli:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "tgsherlock.__version__" }
 
 [tool.setuptools.packages.find]
 where = ["src"]

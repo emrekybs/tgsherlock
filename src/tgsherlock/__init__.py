@@ -1,2 +1,2 @@
 """TGSherlock — local web panel for Telegram OSINT."""
-__version__ = "1.0.0"
+__version__ = "2026.11.3.134"
