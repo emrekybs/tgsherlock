@@ -1,16 +1,16 @@
 <p align="center">
-  <img src="src/tgsherlock/static/logo-sm.png" width="120" alt="TGSherlock logo">
+  <img src="https://raw.githubusercontent.com/emrekybs/tgsherlock/main/src/tgsherlock/static/logo-sm.png" width="120" alt="TGSherlock logo">
 </p>
 <h1 align="center">TGSherlock</h1>
 <p align="center">Telegram OSINT in a local web panel: live monitoring, alerts, user tracking and keyword sweeps.</p>
 
-![Dashboard](docs/screenshots/dashboard.png)
-![User profile](docs/screenshots/profile.png)
+![Dashboard](https://raw.githubusercontent.com/emrekybs/tgsherlock/main/docs/screenshots/dashboard.png)
+![User profile](https://raw.githubusercontent.com/emrekybs/tgsherlock/main/docs/screenshots/profile.png)
 
 ## Install
 
 ```bash
-pipx install git+https://github.com/emrekybs/tgsherlock.git
+pipx install tgsherlock
 ```
 
 From a local clone: `pipx install .` (if `tgsherlock` is not found afterwards, run `pipx ensurepath` and open a new terminal).
